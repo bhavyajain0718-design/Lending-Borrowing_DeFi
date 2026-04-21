@@ -1,0 +1,7 @@
+frontend/.env.local
+frontend/node_modules
+frontend/.next
+Contracts/cache
+Contracts/out
+Contracts/broadcast
+.DS_Store
