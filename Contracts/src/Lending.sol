@@ -5,6 +5,9 @@ import {Corn} from "./Corn.sol";
 import {CornDEX} from "./CornDEX.sol";
 import {ICornFlashLoanReceiver} from "./interfaces/ICornFlashLoanReceiver.sol";
 
+/// @title Lending
+/// @author Bhavya Jain
+/// @notice Over-collateralized lending market where users deposit ETH and borrow CORN.
 contract Lending {
     uint256 public constant BPS = 10_000;
     uint256 public constant MIN_COLLATERAL_RATIO_BPS = 12_000;
@@ -37,6 +40,9 @@ contract Lending {
     error ExcessiveRepayAmount(uint256 maxRepay);
     error EthTransferFailed();
 
+    /// @notice Initializes the lending market with the CORN token and CornDEX oracle.
+    /// @param _corn Address of the CORN token contract.
+    /// @param _cornDex Address of the CornDEX price source.
     constructor(Corn _corn, CornDEX _cornDex) {
         corn = _corn;
         cornDex = _cornDex;
@@ -44,10 +50,13 @@ contract Lending {
 
     receive() external payable {}
 
+    /// @notice Deposits ETH collateral for the caller.
     function depositCollateral() external payable {
         _depositFor(msg.sender, msg.value);
     }
 
+    /// @notice Withdraws ETH collateral as long as the resulting position stays healthy.
+    /// @param amount Amount of ETH to withdraw.
     function withdrawCollateral(uint256 amount) external {
         if (amount == 0) revert ZeroAmount();
         collateralBalance[msg.sender] -= amount;
@@ -59,6 +68,8 @@ contract Lending {
         emit CollateralWithdrawn(msg.sender, amount);
     }
 
+    /// @notice Borrows CORN against the caller's deposited ETH collateral.
+    /// @param amount Amount of CORN to borrow.
     function borrow(uint256 amount) external {
         if (amount == 0) revert ZeroAmount();
         debtBalance[msg.sender] += amount;
@@ -68,6 +79,8 @@ contract Lending {
         emit Borrowed(msg.sender, amount);
     }
 
+    /// @notice Repays some or all of the caller's outstanding CORN debt.
+    /// @param amount Amount of CORN to repay.
     function repay(uint256 amount) external {
         if (amount == 0) revert ZeroAmount();
         uint256 debt = debtBalance[msg.sender];
@@ -79,6 +92,9 @@ contract Lending {
         emit Repaid(msg.sender, repaid);
     }
 
+    /// @notice Liquidates an unhealthy borrower after their grace period expires.
+    /// @param user Borrower whose position is being liquidated.
+    /// @param repayAmount Amount of CORN debt to repay on behalf of the borrower.
     function liquidate(address user, uint256 repayAmount) external {
         if (repayAmount == 0) revert ZeroAmount();
         uint256 healthFactor = getHealthFactor(user);
@@ -109,6 +125,10 @@ contract Lending {
         emit Liquidated(msg.sender, user, repayAmount, seizeEth);
     }
 
+    /// @notice Issues a zero-fee CORN flash loan that must be repaid in the same transaction.
+    /// @param receiver Contract receiving the flash-loaned CORN.
+    /// @param amount Amount of CORN to borrow.
+    /// @param data Arbitrary callback data forwarded to the receiver.
     function flashLoan(ICornFlashLoanReceiver receiver, uint256 amount, bytes calldata data) external {
         uint256 fee = 0;
         corn.mint(address(receiver), amount);
@@ -118,10 +138,16 @@ contract Lending {
         emit FlashLoan(address(receiver), amount, fee);
     }
 
+    /// @notice Returns the caller's collateral valued in CORN using the CornDEX price.
+    /// @param user Address whose collateral value is being queried.
+    /// @return Collateral value quoted in CORN with 18 decimals.
     function getCollateralValueInCorn(address user) public view returns (uint256) {
         return (collateralBalance[user] * cornDex.ethPriceInCorn()) / 1e18;
     }
 
+    /// @notice Computes the position health factor normalized to the minimum collateral ratio.
+    /// @param user Address whose health factor is being queried.
+    /// @return Health factor where 1e18 represents the liquidation threshold.
     function getHealthFactor(address user) public view returns (uint256) {
         uint256 debt = debtBalance[user];
         if (debt == 0) {
@@ -132,6 +158,9 @@ contract Lending {
         return (collateralValue * 1e18 * BPS) / (debt * MIN_COLLATERAL_RATIO_BPS);
     }
 
+    /// @notice Returns the maximum CORN debt that can currently be repaid in one liquidation.
+    /// @param user Address whose liquidation cap is being queried.
+    /// @return Maximum repayable CORN amount for liquidation.
     function getMaxLiquidationRepay(address user) public view returns (uint256) {
         uint256 debt = debtBalance[user];
         uint256 collateralValue = getCollateralValueInCorn(user);
@@ -139,6 +168,12 @@ contract Lending {
         return debt < collateralLimitedRepay ? debt : collateralLimitedRepay;
     }
 
+    /// @notice Returns the borrower's current protection-window state.
+    /// @param user Address whose protection status is being queried.
+    /// @return healthFactor Current health factor for the position.
+    /// @return atRiskSince Timestamp when the current unhealthy period started, or zero if healthy.
+    /// @return protectionEndsAt Timestamp when the grace period ends, or zero if healthy.
+    /// @return canLiquidate Whether liquidation is currently allowed.
     function getProtectionState(address user)
         external
         view
@@ -156,10 +191,13 @@ contract Lending {
         }
     }
 
+    /// @notice Recomputes and stores the risk state for a single borrower.
+    /// @param user Borrower whose risk state should be refreshed.
     function syncRiskState(address user) external {
         _syncRiskState(user);
     }
 
+    /// @notice Recomputes and stores the risk state for every tracked borrower.
     function syncAllRiskStates() external {
         uint256 borrowerCount = borrowers.length;
         for (uint256 i = 0; i < borrowerCount; i++) {
