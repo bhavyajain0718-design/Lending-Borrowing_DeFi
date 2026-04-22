@@ -47,6 +47,43 @@ contract NeverlandLendingTest is Test {
         assertEq(lending.getHealthFactor(homeowner), expectedHealthFactor);
     }
 
+    function testMovePriceCrashMakesLoanUnhealthy() public {
+        uint256 healthFactorBefore = lending.getHealthFactor(homeowner);
+        assertGt(healthFactorBefore, 1e18);
+
+        movePrice.moveEthPriceInCorn(CRASHED_PRICE);
+
+        uint256 healthFactorAfter = lending.getHealthFactor(homeowner);
+        assertLt(healthFactorAfter, 1e18);
+
+        (uint256 protectionHealthFactor, uint256 atRiskSince, uint256 protectionEndsAt, bool canLiquidate) =
+            lending.getProtectionState(homeowner);
+
+        assertEq(protectionHealthFactor, healthFactorAfter);
+        assertEq(atRiskSince, block.timestamp);
+        assertEq(protectionEndsAt, block.timestamp + 24 hours);
+        assertFalse(canLiquidate);
+    }
+
+    function testCrashThenImmediateLiquidationFailsThenSucceedsAfterTwentyFiveHours() public {
+        movePrice.moveEthPriceInCorn(CRASHED_PRICE);
+
+        vm.prank(liquidatorOperator);
+        vm.expectRevert(abi.encodeWithSelector(Lending.GracePeriodActive.selector, 24 hours));
+        flashLoanLiquidator.execute(homeowner, 2_500e18, liquidatorOperator);
+
+        vm.warp(block.timestamp + 25 hours);
+
+        uint256 debtBefore = lending.debtBalance(homeowner);
+        uint256 collateralBefore = lending.collateralBalance(homeowner);
+
+        vm.prank(liquidatorOperator);
+        flashLoanLiquidator.execute(homeowner, 2_500e18, liquidatorOperator);
+
+        assertEq(lending.debtBalance(homeowner), debtBefore - 2_500e18);
+        assertLt(lending.collateralBalance(homeowner), collateralBefore);
+    }
+
     function testGracePeriodBlocksImmediateFlashLoanLiquidation() public {
         movePrice.moveEthPriceInCorn(CRASHED_PRICE);
 

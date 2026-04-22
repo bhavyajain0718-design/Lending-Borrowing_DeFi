@@ -51,6 +51,7 @@ type Props = {
 
 type TabId = "home" | "dashboard" | "debug";
 type TxState = { kind: "idle" } | { kind: "pending"; label: string } | { kind: "success"; label: string } | { kind: "error"; label: string };
+type WarningState = { title: string; message: string } | null;
 type FormState = {
   depositEth: string;
   withdrawEth: string;
@@ -160,6 +161,7 @@ export function ProtectionDashboard({
   const [selectedTab, setSelectedTab] = useState<TabId>("dashboard");
   const [connectedAddress, setConnectedAddress] = useState<string | null>(null);
   const [txState, setTxState] = useState<TxState>({ kind: "idle" });
+  const [warning, setWarning] = useState<WarningState>(null);
   const [forms, setForms] = useState<FormState>({
     depositEth: "",
     withdrawEth: "",
@@ -354,6 +356,33 @@ export function ProtectionDashboard({
   }
 
   async function handleWithdraw() {
+    const withdrawAmount = Number(forms.withdrawEth.trim());
+    const currentCollateralEth = dashboard?.collateralEth ?? 0;
+    const currentDebtCorn = dashboard?.debtCorn ?? 0;
+    const cornPerEth = dashboard?.cornPriceEth ? 1 / dashboard.cornPriceEth : 0;
+
+    if (Number.isFinite(withdrawAmount) && withdrawAmount > 0 && currentDebtCorn > 0) {
+      const projectedCollateralEth = currentCollateralEth - withdrawAmount;
+      const projectedCollateralCorn = projectedCollateralEth * cornPerEth;
+      const projectedRatio = projectedCollateralCorn / currentDebtCorn;
+
+      if (projectedCollateralEth < 0) {
+        setWarning({
+          title: "Withdrawal exceeds collateral",
+          message: `You only have ${formatAmount(currentCollateralEth)} ETH deposited, so withdrawing ${formatAmount(withdrawAmount)} ETH is not possible.`,
+        });
+        return;
+      }
+
+      if (projectedRatio < 1.2) {
+        setWarning({
+          title: "This withdrawal makes the loan unhealthy",
+          message: `Withdrawing ${formatAmount(withdrawAmount)} ETH would drop your collateral ratio to ${formatAmount(projectedRatio * 100, 1)}%, below the 120% safety floor. Add collateral or repay some CORN before withdrawing this much.`,
+        });
+        return;
+      }
+    }
+
     await runTransaction("Collateral withdrawal", async () => {
       const { signer } = await ensureWalletReady();
       const lending = new Contract(lendingAddress!, lendingAbi, signer);
@@ -465,6 +494,17 @@ export function ProtectionDashboard({
         <div className={`tx-banner tx-banner-${txState.kind}`}>{txState.label}</div>
       )}
       {error && <div className="dashboard-error">Dashboard error: {error}</div>}
+      {warning && (
+        <div className="warning-overlay" role="dialog" aria-modal="true">
+          <div className="warning-modal">
+            <h3>{warning.title}</h3>
+            <p>{warning.message}</p>
+            <button className="action-button" onClick={() => setWarning(null)}>
+              Got it
+            </button>
+          </div>
+        </div>
+      )}
 
       {selectedTab === "home" && (
         <section className="home-hero">
