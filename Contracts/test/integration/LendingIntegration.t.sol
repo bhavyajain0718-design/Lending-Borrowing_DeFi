@@ -89,4 +89,25 @@ contract LendingIntegrationTest is Test {
         assertLt(lending.collateralBalance(homeowner), beforeCollateral);
         assertGt(liquidatorOperator.balance, liquidatorBalanceBefore);
     }
+
+    function testLiquidationPaysExactTenPercentBonusToLiquidator() public {
+        movePrice.moveEthPriceInCorn(CRASHED_PRICE);
+        vm.warp(block.timestamp + 25 hours);
+
+        uint256 repayAmount = 1_000e18;
+        uint256 expectedSeizedEth = (((repayAmount * lending.LIQUIDATION_BONUS_BPS()) / lending.BPS()) * 1e18) / CRASHED_PRICE;
+
+        corn.mint(liquidatorOperator, repayAmount);
+
+        uint256 liquidatorBalanceBefore = liquidatorOperator.balance;
+        uint256 borrowerCollateralBefore = lending.collateralBalance(homeowner);
+
+        vm.startPrank(liquidatorOperator);
+        corn.approve(address(lending), repayAmount);
+        lending.liquidate(homeowner, repayAmount);
+        vm.stopPrank();
+
+        assertEq(liquidatorOperator.balance - liquidatorBalanceBefore, expectedSeizedEth);
+        assertEq(borrowerCollateralBefore - lending.collateralBalance(homeowner), expectedSeizedEth);
+    }
 }

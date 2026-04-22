@@ -11,6 +11,22 @@ Users can:
 - monitor the 24-hour protection window when a position becomes unhealthy
 - liquidate expired unhealthy positions
 
+## How Does It Work? (Visual Overview)
+
+```mermaid
+flowchart TD
+    A[User deposits ETH as collateral] --> B[Lending Contract]
+    B --> C[User borrows CORN tokens]
+    C --> D[User can repay CORN to unlock ETH]
+    C --> E[If ETH value drops, position can be liquidated]
+    E --> F[Liquidator repays CORN, receives ETH + 10% reward]
+```
+
+- **Collateralization Ratio:** You must always have at least 120% of your loan value in ETH.
+- **Liquidation:** If your collateral drops below this, anyone can repay your loan and claim your ETH (plus a 10% bonus).
+
+---
+
 ## What Is Implemented
 
 ### Protocol rules
