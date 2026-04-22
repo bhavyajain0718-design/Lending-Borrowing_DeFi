@@ -62,6 +62,20 @@ Important note:
 - the liquidation watch tab is based on a local tracked-address watchlist
 - there is no on-chain borrower registry in the contracts right now
 
+## Screenshots
+
+### Current UI
+
+![Current UI](docs/screenshots/current-ui.png)
+
+### Liquidation Watch
+
+![Liquidation Watch](docs/screenshots/current-ui-watch.png)
+
+### Foundry Tests
+
+![Foundry Tests](docs/screenshots/testing-suite.png)
+
 ## How The Protection Window Works
 
 When a borrower falls below the safe health factor:
