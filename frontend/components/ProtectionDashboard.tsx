@@ -81,6 +81,7 @@ const SEPOLIA_FAUCET_URL = "https://www.alchemy.com/faucets/ethereum-sepolia";
 const MAX_RATIO_HISTORY_POINTS = 24;
 const RATIO_HISTORY_STORAGE_KEY = "neverland_ratio_history";
 const WATCHLIST_STORAGE_KEY = "neverland_liquidation_watchlist";
+const VIEWED_ADDRESS_STORAGE_KEY = "neverland_viewed_address";
 
 const statusCopy = {
   secure: {
@@ -164,6 +165,15 @@ function readStoredWatchlist() {
     return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
   } catch {
     return [];
+  }
+}
+
+function readStoredViewedAddress() {
+  if (typeof window === "undefined") return "";
+  try {
+    return normalizeAddress(window.localStorage.getItem(VIEWED_ADDRESS_STORAGE_KEY) ?? "");
+  } catch {
+    return "";
   }
 }
 
@@ -352,6 +362,7 @@ export function ProtectionDashboard({
   const [ratioHistoryByWallet, setRatioHistoryByWallet] = useState<Record<string, RatioSnapshot[]>>({});
   const [watchlist, setWatchlist] = useState<string[]>([]);
   const [watchAddressInput, setWatchAddressInput] = useState("");
+  const [selectedViewAddress, setSelectedViewAddress] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [selectedTab, setSelectedTab] = useState<TabId>("dashboard");
   const [connectedAddress, setConnectedAddress] = useState<string | null>(null);
@@ -373,9 +384,14 @@ export function ProtectionDashboard({
   useEffect(() => {
     setRatioHistoryByWallet(readStoredRatioHistory());
     setWatchlist(readStoredWatchlist());
+    setSelectedViewAddress(readStoredViewedAddress());
   }, []);
 
   const viewedAddress = useMemo(() => normalizeAddress(connectedAddress), [connectedAddress]);
+  const activeAddress = useMemo(
+    () => normalizeAddress(selectedViewAddress) || viewedAddress || normalizeAddress(homeownerAddress),
+    [homeownerAddress, selectedViewAddress, viewedAddress],
+  );
 
   useEffect(() => {
     setForms(current => ({
@@ -401,13 +417,28 @@ export function ProtectionDashboard({
   }, [watchlist]);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(VIEWED_ADDRESS_STORAGE_KEY, selectedViewAddress);
+  }, [selectedViewAddress]);
+
+  useEffect(() => {
     setWatchlist(current =>
       uniqueConfiguredAddresses([
         ...current,
+        connectedAddress,
         homeownerAddress,
       ]),
     );
-  }, [homeownerAddress]);
+  }, [connectedAddress, homeownerAddress]);
+
+  useEffect(() => {
+    if (isConfiguredAddress(activeAddress)) return;
+
+    const fallbackAddress = uniqueConfiguredAddresses([connectedAddress, homeownerAddress, ...watchlist])[0] ?? "";
+    if (fallbackAddress) {
+      setSelectedViewAddress(fallbackAddress);
+    }
+  }, [activeAddress, connectedAddress, homeownerAddress, watchlist]);
 
   useEffect(() => {
     if (!rpcUrl) {
@@ -537,7 +568,6 @@ export function ProtectionDashboard({
   function disconnectWallet() {
     setConnectedAddress(null);
     setConnectedChainId(null);
-    setDashboard(null);
     setWalletTrayOpen(false);
     setError(null);
   }
@@ -550,69 +580,79 @@ export function ProtectionDashboard({
     }
 
     setWatchlist(current => uniqueConfiguredAddresses([...current, nextAddress]));
+    if (!activeAddress) {
+      setSelectedViewAddress(nextAddress);
+    }
     setWatchAddressInput("");
     setError(null);
   }
 
   function removeWatchAddress(address: string) {
     setWatchlist(current => current.filter(entry => entry !== address));
+    if (normalizeAddress(address) === activeAddress && activeAddress !== viewedAddress && activeAddress !== normalizeAddress(homeownerAddress)) {
+      setSelectedViewAddress("");
+    }
   }
 
   function prepareLiquidation(address: string) {
+    focusAddress(address);
     setForms(current => ({ ...current, liquidateUser: address }));
     setSelectedTab("dashboard");
   }
 
-  async function refreshDashboard() {
-    try {
-      if (!rpcUrl) {
-        throw new Error("Missing NEXT_PUBLIC_RPC_URL. Add it before starting the frontend.");
-      }
-      if (!isConfiguredAddress(lendingAddress)) {
-        throw new Error("NEXT_PUBLIC_LENDING_ADDRESS is missing or invalid.");
-      }
+  function focusAddress(address: string) {
+    const normalized = normalizeAddress(address);
+    if (!isConfiguredAddress(normalized)) return;
 
-      const accountToView = viewedAddress;
-      if (!isConfiguredAddress(accountToView)) {
-        setDashboard(null);
-        setError(null);
-        return;
-      }
+    setSelectedViewAddress(normalized);
+    setWatchlist(current => uniqueConfiguredAddresses([...current, normalized]));
+    setError(null);
+  }
 
-      const provider = providerRef.current;
-      if (!provider) return;
+  async function loadDashboardState(accountToView: string) {
+    if (!rpcUrl) {
+      throw new Error("Missing NEXT_PUBLIC_RPC_URL. Add it before starting the frontend.");
+    }
+    if (!isConfiguredAddress(lendingAddress)) {
+      throw new Error("NEXT_PUBLIC_LENDING_ADDRESS is missing or invalid.");
+    }
 
-      const lending = new Contract(lendingAddress, lendingAbi, provider);
-      const [
-        collateralBalance,
-        debtBalance,
-        collateralValueInCorn,
-        healthFactor,
-        maxLiquidationRepay,
-        cornDexAddress,
-        cornAddress,
-        protectionState,
-        walletEthRaw,
-      ] = await Promise.all([
-        lending.collateralBalance(accountToView),
-        lending.debtBalance(accountToView),
-        lending.getCollateralValueInCorn(accountToView),
-        lending.getHealthFactor(accountToView),
-        lending.getMaxLiquidationRepay(accountToView),
-        lending.cornDex(),
-        lending.corn(),
-        lending.getProtectionState(accountToView),
-        provider.getBalance(accountToView),
-      ]);
+    const provider = providerRef.current;
+    if (!provider) return null;
 
-      const cornDex = new Contract(cornDexAddress, lendingAbi, provider);
-      const cornToken = new Contract(cornAddress, lendingAbi, provider);
-      const [cornPriceInCorn, walletCornRaw] = await Promise.all([
-        cornDex.ethPriceInCorn(),
-        cornToken.balanceOf(accountToView),
-      ]);
+    const lending = new Contract(lendingAddress, lendingAbi, provider);
+    const [
+      collateralBalance,
+      debtBalance,
+      collateralValueInCorn,
+      healthFactor,
+      maxLiquidationRepay,
+      cornDexAddress,
+      cornAddress,
+      protectionState,
+      walletEthRaw,
+    ] = await Promise.all([
+      lending.collateralBalance(accountToView),
+      lending.debtBalance(accountToView),
+      lending.getCollateralValueInCorn(accountToView),
+      lending.getHealthFactor(accountToView),
+      lending.getMaxLiquidationRepay(accountToView),
+      lending.cornDex(),
+      lending.corn(),
+      lending.getProtectionState(accountToView),
+      provider.getBalance(accountToView),
+    ]);
 
-      setDashboard({
+    const cornDex = new Contract(cornDexAddress, lendingAbi, provider);
+    const cornToken = new Contract(cornAddress, lendingAbi, provider);
+    const [cornPriceInCorn, walletCornRaw] = await Promise.all([
+      cornDex.ethPriceInCorn(),
+      cornToken.balanceOf(accountToView),
+    ]);
+
+    return {
+      account: accountToView,
+      state: {
         collateralEth: Number(formatEther(collateralBalance)),
         collateralValueCorn: Number(formatUnits(collateralValueInCorn, 18)),
         debtCorn: Number(formatUnits(debtBalance, 18)),
@@ -629,33 +669,51 @@ export function ProtectionDashboard({
           protectionEndsAt: Number(protectionState[2]),
           canLiquidate: Boolean(protectionState[3]),
         },
-      });
+      } satisfies DashboardState,
+    };
+  }
 
-      const liveRatioPercent = ratioToPercent(Number(formatUnits(healthFactor, 18)));
-      if (Number.isFinite(liveRatioPercent)) {
-        setRatioHistoryByWallet(current => {
-          const existingHistory = current[accountToView] ?? [];
-          const nextEntry = {
-            timestamp: now,
-            ratioPercent: liveRatioPercent,
-          };
-          const nextHistory =
-            existingHistory.length === 0
-              ? [
-                  { timestamp: now - 60, ratioPercent: liveRatioPercent },
-                  { timestamp: now - 45, ratioPercent: liveRatioPercent },
-                  { timestamp: now - 30, ratioPercent: liveRatioPercent },
-                  { timestamp: now - 15, ratioPercent: liveRatioPercent },
-                  nextEntry,
-                ]
-              : [...existingHistory, nextEntry];
+  function pushRatioSnapshot(account: string, healthFactor: number) {
+    const liveRatioPercent = ratioToPercent(healthFactor);
+    if (!Number.isFinite(liveRatioPercent)) return;
 
-          return {
-            ...current,
-            [accountToView]: nextHistory.slice(-MAX_RATIO_HISTORY_POINTS),
-          };
-        });
+    setRatioHistoryByWallet(current => {
+      const existingHistory = current[account] ?? [];
+      const nextEntry = {
+        timestamp: now,
+        ratioPercent: liveRatioPercent,
+      };
+      const nextHistory =
+        existingHistory.length === 0
+          ? [
+              { timestamp: now - 60, ratioPercent: liveRatioPercent },
+              { timestamp: now - 45, ratioPercent: liveRatioPercent },
+              { timestamp: now - 30, ratioPercent: liveRatioPercent },
+              { timestamp: now - 15, ratioPercent: liveRatioPercent },
+              nextEntry,
+            ]
+          : [...existingHistory, nextEntry];
+
+      return {
+        ...current,
+        [account]: nextHistory.slice(-MAX_RATIO_HISTORY_POINTS),
+      };
+    });
+  }
+
+  async function refreshDashboard() {
+    try {
+      const accountToView = activeAddress;
+      if (!isConfiguredAddress(accountToView)) {
+        setDashboard(null);
+        setError(null);
+        return;
       }
+      const loaded = await loadDashboardState(accountToView);
+      if (!loaded) return;
+
+      setDashboard(loaded.state);
+      pushRatioSnapshot(loaded.account, loaded.state.healthFactor);
       setError(null);
     } catch (loadError) {
       setError(extractErrorMessage(loadError));
@@ -717,7 +775,7 @@ export function ProtectionDashboard({
       void refreshWatchlist();
     }, pollIntervalMs);
     return () => window.clearInterval(poll);
-  }, [viewedAddress, lendingAddress, pollIntervalMs, rpcUrl, watchlist]);
+  }, [activeAddress, lendingAddress, pollIntervalMs, rpcUrl, watchlist]);
 
   async function runTransaction(label: string, action: () => Promise<void>) {
     try {
@@ -827,34 +885,90 @@ export function ProtectionDashboard({
   }
 
   async function handleLiquidate() {
-    if (dashboard && !dashboard.protection.canLiquidate) {
-      const endsAt =
-        dashboard.protection.protectionEndsAt > now
-          ? new Date(dashboard.protection.protectionEndsAt * 1000).toLocaleString()
-          : null;
+    const targetUser = normalizeAddress(forms.liquidateUser);
+    if (!isConfiguredAddress(targetUser)) {
+      setTxState({ kind: "error", label: "Enter a valid borrower address to liquidate." });
+      return;
+    }
 
-      setWarning({
-        title: "Protection window is still active",
-        message: endsAt
-          ? `This position cannot be liquidated yet. The 24-hour protection window stays active until ${endsAt}.`
-          : "This position cannot be liquidated yet because the 24-hour protection window is still active.",
-      });
+    let requestedAmount: bigint;
+    try {
+      requestedAmount = parseInputAmount(forms.liquidateCorn, "corn");
+    } catch (amountError) {
+      setTxState({ kind: "error", label: extractErrorMessage(amountError) });
       return;
     }
 
     await runTransaction("Liquidation", async () => {
-      const targetUser = normalizeAddress(forms.liquidateUser);
-      if (!isConfiguredAddress(targetUser)) {
-        throw new Error("Enter a valid borrower address to liquidate.");
-      }
       const { signer } = await ensureWalletReady();
       const lending = new Contract(lendingAddress!, lendingAbi, signer);
       const cornAddress = await lending.corn();
       const cornToken = new Contract(cornAddress, lendingAbi, signer);
-      const amount = parseInputAmount(forms.liquidateCorn, "corn");
-      const approvalTx = await cornToken.approve(lendingAddress!, amount);
+      const signerAddress = normalizeAddress(await signer.getAddress());
+
+      const [protectionState, healthFactorRaw, maxLiquidationRepayRaw, walletCornRaw] = await Promise.all([
+        lending.getProtectionState(targetUser),
+        lending.getHealthFactor(targetUser),
+        lending.getMaxLiquidationRepay(targetUser),
+        cornToken.balanceOf(signerAddress),
+      ]);
+
+      const protection = {
+        healthFactor: Number(formatUnits(protectionState[0], 18)),
+        protectionEndsAt: Number(protectionState[2]),
+        canLiquidate: Boolean(protectionState[3]),
+      };
+
+      if (protection.healthFactor > 1 || Number(formatUnits(healthFactorRaw, 18)) > 1) {
+        setWarning({
+          title: "Position is still safe",
+          message: "This borrower is still above the liquidation threshold, so liquidation is not allowed.",
+        });
+        return;
+      }
+
+      if (!protection.canLiquidate) {
+        const endsAt =
+          protection.protectionEndsAt > now
+            ? new Date(protection.protectionEndsAt * 1000).toLocaleString()
+            : null;
+
+        setWarning({
+          title: "Protection window is still active",
+          message: endsAt
+            ? `This position cannot be liquidated yet. The 24-hour protection window stays active until ${endsAt}.`
+            : "This position cannot be liquidated yet because the 24-hour protection window is still active.",
+        });
+        return;
+      }
+
+      if (walletCornRaw < requestedAmount) {
+        setWarning({
+          title: "Not enough CORN",
+          message: `You need ${formatAmount(Number(formatUnits(requestedAmount, 18)))} CORN to liquidate this amount, but your wallet only has ${formatAmount(Number(formatUnits(walletCornRaw, 18)))} CORN.`,
+        });
+        return;
+      }
+
+      if (maxLiquidationRepayRaw === 0n) {
+        setWarning({
+          title: "Nothing to liquidate",
+          message: "This position does not currently have liquidatable debt.",
+        });
+        return;
+      }
+
+      if (requestedAmount > maxLiquidationRepayRaw) {
+        setWarning({
+          title: "Repay amount is too high",
+          message: `You can liquidate at most ${formatAmount(Number(formatUnits(maxLiquidationRepayRaw, 18)))} CORN right now for this borrower.`,
+        });
+        return;
+      }
+
+      const approvalTx = await cornToken.approve(lendingAddress!, requestedAmount);
       await approvalTx.wait();
-      const liquidateTx = await lending.liquidate(targetUser, amount);
+      const liquidateTx = await lending.liquidate(targetUser, requestedAmount);
       await liquidateTx.wait();
       setForms(current => ({ ...current, liquidateCorn: "" }));
     });
@@ -872,10 +986,10 @@ export function ProtectionDashboard({
       ? dashboard.protection.protectionEndsAt - now
       : 0;
 
-  const activeAddress = viewedAddress;
   const hasPosition = (dashboard?.collateralEth ?? 0) > 0 || (dashboard?.debtCorn ?? 0) > 0;
   const ratioPercent = ratioToPercent(dashboard?.healthFactor ?? Infinity);
   const safeBorrowCorn = maxSafeBorrowCorn(dashboard?.collateralValueCorn ?? 0, dashboard?.debtCorn ?? 0);
+  const viewerOptions = uniqueConfiguredAddresses([connectedAddress, homeownerAddress, ...watchlist]);
   const ratioHistory = activeAddress ? ratioHistoryByWallet[activeAddress] ?? [] : [];
   const showChartSeries = hasPosition && (ratioHistory.length > 0 || Number.isFinite(ratioPercent));
   const chartBounds = buildChartBounds(ratioPercent);
@@ -902,7 +1016,14 @@ export function ProtectionDashboard({
   const networkName = chainLabel(connectedChainId);
   const connectedLabel = connectedAddress ? shortenAddress(connectedAddress) : "Connect Wallet";
   const walletBadge = getWalletBadge(connectedAddress);
-  const needsWallet = !connectedAddress;
+  const needsWallet = !activeAddress;
+  const isViewingConnectedWallet = Boolean(viewedAddress) && activeAddress === viewedAddress;
+  const actionLockMessage = !connectedAddress
+    ? "Connect your wallet to manage a borrower position."
+    : !isViewingConnectedWallet
+      ? "You are viewing another investor's position. Only liquidation is allowed here, and only after the protection window expires."
+      : null;
+  const liquidationDisabled = !connectedAddress || !dashboard?.protection.canLiquidate;
 
   return (
     <div className="shell">
@@ -1025,7 +1146,7 @@ export function ProtectionDashboard({
             <h1>{needsWallet ? "Connect The Wallet" : status.title}</h1>
             <p className="hero-copy">
               {needsWallet
-                ? "Connect your wallet to load live balances, borrowing controls, protection status, and liquidation timing."
+                ? "Connect a wallet or pick a tracked borrower to load live balances, position health, and liquidation timing."
                 : status.description}
             </p>
             {needsWallet ? (
@@ -1034,7 +1155,7 @@ export function ProtectionDashboard({
               </button>
             ) : (
               <div className="home-grid">
-                <MetricCard label="Connected Wallet" value={activeAddress ? shortenAddress(activeAddress) : "Not connected"} />
+                <MetricCard label="Viewing Address" value={activeAddress ? shortenAddress(activeAddress) : "Not connected"} />
                 <MetricCard label="CORN Wallet" value={`${formatAmount(dashboard?.walletCorn ?? 0)} CORN`} />
                 <MetricCard label="Collateral Value" value={`${formatAmount(dashboard?.collateralValueCorn ?? 0)} CORN`} />
                 <MetricCard label="Protection Ends" value={dashboard?.protection.protectionEndsAt ? new Date(dashboard.protection.protectionEndsAt * 1000).toLocaleString() : "Not active"} />
@@ -1049,7 +1170,7 @@ export function ProtectionDashboard({
           {needsWallet ? (
             <WalletEmptyState
               title="Connect The Wallet"
-              message="The dashboard needs an active wallet to show your collateral, debt, health factor, protection window, and transaction actions."
+              message="Connect a wallet or choose a tracked borrower to show collateral, debt, health factor, and protection timing."
               onConnect={connectWallet}
             />
           ) : (
@@ -1081,8 +1202,11 @@ export function ProtectionDashboard({
 
           <div className="dashboard-grid">
             <div className="left-column">
+              {actionLockMessage ? <div className="chart-hint">{actionLockMessage}</div> : null}
               <ActionPanel
                 title="Collateral Operations"
+                disableFields={Boolean(actionLockMessage)}
+                disableActions={Boolean(actionLockMessage)}
                 fields={[
                   {
                     label: "Deposit Collateral (ETH)",
@@ -1105,6 +1229,8 @@ export function ProtectionDashboard({
 
               <ActionPanel
                 title="Borrow Operations"
+                disableFields={Boolean(actionLockMessage)}
+                disableActions={Boolean(actionLockMessage)}
                 fields={[
                   {
                     label: "Borrow CORN",
@@ -1131,6 +1257,7 @@ export function ProtectionDashboard({
 
               <ActionPanel
                 title="Liquidation Operations"
+                disableActions={liquidationDisabled}
                 fields={[
                   {
                     label: "Borrower Address",
@@ -1147,6 +1274,11 @@ export function ProtectionDashboard({
                 ]}
                 actions={[{ label: "Approve + Liquidate", onClick: handleLiquidate }]}
               />
+              {!dashboard?.protection.canLiquidate ? (
+                <div className="chart-hint">
+                  Liquidation stays locked until this position turns red and the protection window has expired.
+                </div>
+              ) : null}
             </div>
 
             <div className="right-column">
@@ -1154,6 +1286,18 @@ export function ProtectionDashboard({
                 <div className="panel-header">
                   <h2>Position Overview</h2>
                   <span className="panel-badge">{hasPosition ? "Active Position" : "No Position"}</span>
+                </div>
+                <div className="watch-input-row">
+                  <select className="input" value={activeAddress} onChange={event => focusAddress(event.target.value)}>
+                    {viewerOptions.map(address => (
+                      <option key={address} value={address}>
+                        {address === viewedAddress ? `${shortenAddress(address)} (connected)` : shortenAddress(address)}
+                      </option>
+                    ))}
+                  </select>
+                  <button className="action-button action-button-secondary" onClick={() => viewedAddress && focusAddress(viewedAddress)} disabled={!viewedAddress}>
+                    View My Wallet
+                  </button>
                 </div>
                 <div className="table-card">
                   <div className="table-head">
@@ -1340,18 +1484,23 @@ export function ProtectionDashboard({
                           ? new Date(position.protection.protectionEndsAt * 1000).toLocaleString()
                           : "Not active"}
                       </span>
-                      {canLiquidate ? (
-                        <button
-                          className="row-action-button"
-                          onClick={() => prepareLiquidation(position.address)}
-                        >
-                          Use for liquidation
+                      <div>
+                        <button className="row-action-button" onClick={() => focusAddress(position.address)}>
+                          View position
                         </button>
-                      ) : (
-                        <div className="monitor-note">
-                          Protected while the recovery window is active
-                        </div>
-                      )}
+                        {canLiquidate ? (
+                          <button
+                            className="row-action-button"
+                            onClick={() => prepareLiquidation(position.address)}
+                          >
+                            Use for liquidation
+                          </button>
+                        ) : (
+                          <div className="monitor-note">
+                            Protected while the recovery window is active
+                          </div>
+                        )}
+                      </div>
                     </div>
                   );
                 })
@@ -1381,6 +1530,8 @@ function ActionPanel({
   title,
   fields,
   actions,
+  disableFields = false,
+  disableActions = false,
 }: {
   title: string;
   fields: Array<{
@@ -1391,6 +1542,8 @@ function ActionPanel({
     hint?: string;
   }>;
   actions: Array<{ label: string; onClick: () => void; tone?: "secondary" }>;
+  disableFields?: boolean;
+  disableActions?: boolean;
 }) {
   return (
     <section className="panel">
@@ -1406,6 +1559,7 @@ function ActionPanel({
               value={field.value}
               onChange={event => field.onChange(event.target.value)}
               placeholder={field.placeholder}
+              disabled={disableFields}
             />
             {field.hint ? <div className="field-hint">{field.hint}</div> : null}
           </div>
@@ -1416,6 +1570,7 @@ function ActionPanel({
               key={action.label}
               className={`action-button ${action.tone === "secondary" ? "action-button-secondary" : ""}`}
               onClick={action.onClick}
+              disabled={disableActions}
             >
               {action.label}
             </button>
