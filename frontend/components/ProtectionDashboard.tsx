@@ -42,6 +42,14 @@ type DashboardState = {
   protection: ProtectionState;
 };
 
+type MonitoredPosition = {
+  address: string;
+  collateralEth: number;
+  debtCorn: number;
+  ratioPercent: number;
+  protection: ProtectionState;
+};
+
 type RatioSnapshot = {
   timestamp: number;
   ratioPercent: number;
@@ -54,7 +62,7 @@ type Props = {
   pollIntervalMs?: number;
 };
 
-type TabId = "home" | "dashboard" | "debug";
+type TabId = "home" | "dashboard" | "market" | "debug";
 type TxState = { kind: "idle" } | { kind: "pending"; label: string } | { kind: "success"; label: string } | { kind: "error"; label: string };
 type WarningState = { title: string; message: string } | null;
 type FormState = {
@@ -72,6 +80,7 @@ const MIN_RATIO_PERCENT = 120;
 const SEPOLIA_FAUCET_URL = "https://www.alchemy.com/faucets/ethereum-sepolia";
 const MAX_RATIO_HISTORY_POINTS = 24;
 const RATIO_HISTORY_STORAGE_KEY = "neverland_ratio_history";
+const WATCHLIST_STORAGE_KEY = "neverland_liquidation_watchlist";
 
 const statusCopy = {
   secure: {
@@ -143,6 +152,38 @@ function maxSafeBorrowCorn(collateralValueCorn: number, debtCorn: number) {
   const allowedDebt = collateralValueCorn / (MIN_RATIO_PERCENT / 100);
   const additionalBorrow = allowedDebt - Math.max(debtCorn, 0);
   return additionalBorrow > 0 ? additionalBorrow : 0;
+}
+
+function readStoredWatchlist() {
+  if (typeof window === "undefined") return [];
+  try {
+    const stored = window.localStorage.getItem(WATCHLIST_STORAGE_KEY);
+    if (!stored) return [];
+    const parsed = JSON.parse(stored);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function uniqueConfiguredAddresses(addresses: Array<string | null | undefined>) {
+  return Array.from(
+    new Set(
+      addresses
+        .map(value => normalizeAddress(value))
+        .filter(address => isConfiguredAddress(address)),
+    ),
+  );
+}
+
+function monitorStatus(protection: ProtectionState) {
+  if (protection.healthFactor > 1) {
+    return { label: "Equity Secure", tone: "secure" as const };
+  }
+  if (protection.canLiquidate) {
+    return { label: "Protection Expired", tone: "expired" as const };
+  }
+  return { label: "Safety Net Active", tone: "active" as const };
 }
 
 function ratioToPercent(healthFactor: number) {
@@ -306,7 +347,10 @@ export function ProtectionDashboard({
   pollIntervalMs = 5000,
 }: Props) {
   const [dashboard, setDashboard] = useState<DashboardState | null>(null);
+  const [monitoredPositions, setMonitoredPositions] = useState<MonitoredPosition[]>([]);
   const [ratioHistoryByWallet, setRatioHistoryByWallet] = useState<Record<string, RatioSnapshot[]>>({});
+  const [watchlist, setWatchlist] = useState<string[]>([]);
+  const [watchAddressInput, setWatchAddressInput] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [selectedTab, setSelectedTab] = useState<TabId>("dashboard");
   const [connectedAddress, setConnectedAddress] = useState<string | null>(null);
@@ -327,6 +371,7 @@ export function ProtectionDashboard({
 
   useEffect(() => {
     setRatioHistoryByWallet(readStoredRatioHistory());
+    setWatchlist(readStoredWatchlist());
   }, []);
 
   const viewedAddress = useMemo(() => normalizeAddress(connectedAddress), [connectedAddress]);
@@ -348,6 +393,20 @@ export function ProtectionDashboard({
     if (typeof window === "undefined") return;
     window.localStorage.setItem(RATIO_HISTORY_STORAGE_KEY, JSON.stringify(ratioHistoryByWallet));
   }, [ratioHistoryByWallet]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(WATCHLIST_STORAGE_KEY, JSON.stringify(watchlist));
+  }, [watchlist]);
+
+  useEffect(() => {
+    setWatchlist(current =>
+      uniqueConfiguredAddresses([
+        ...current,
+        homeownerAddress,
+      ]),
+    );
+  }, [homeownerAddress]);
 
   useEffect(() => {
     if (!rpcUrl) {
@@ -482,6 +541,27 @@ export function ProtectionDashboard({
     setError(null);
   }
 
+  function addWatchAddress() {
+    const nextAddress = normalizeAddress(watchAddressInput);
+    if (!isConfiguredAddress(nextAddress)) {
+      setError("Enter a valid address to watch.");
+      return;
+    }
+
+    setWatchlist(current => uniqueConfiguredAddresses([...current, nextAddress]));
+    setWatchAddressInput("");
+    setError(null);
+  }
+
+  function removeWatchAddress(address: string) {
+    setWatchlist(current => current.filter(entry => entry !== address));
+  }
+
+  function prepareLiquidation(address: string) {
+    setForms(current => ({ ...current, liquidateUser: address }));
+    setSelectedTab("dashboard");
+  }
+
   async function refreshDashboard() {
     try {
       if (!rpcUrl) {
@@ -581,13 +661,62 @@ export function ProtectionDashboard({
     }
   }
 
+  async function refreshWatchlist() {
+    try {
+      if (!rpcUrl || !isConfiguredAddress(lendingAddress)) {
+        setMonitoredPositions([]);
+        return;
+      }
+
+      const provider = providerRef.current;
+      if (!provider) return;
+
+      const addresses = uniqueConfiguredAddresses(watchlist);
+      if (addresses.length === 0) {
+        setMonitoredPositions([]);
+        return;
+      }
+
+      const lending = new Contract(lendingAddress, lendingAbi, provider);
+      const nextPositions = await Promise.all(
+        addresses.map(async address => {
+          const [collateralBalance, debtBalance, healthFactor, protectionState] = await Promise.all([
+            lending.collateralBalance(address),
+            lending.debtBalance(address),
+            lending.getHealthFactor(address),
+            lending.getProtectionState(address),
+          ]);
+
+          return {
+            address,
+            collateralEth: Number(formatEther(collateralBalance)),
+            debtCorn: Number(formatUnits(debtBalance, 18)),
+            ratioPercent: ratioToPercent(Number(formatUnits(healthFactor, 18))),
+            protection: {
+              healthFactor: Number(formatUnits(protectionState[0], 18)),
+              atRiskSince: Number(protectionState[1]),
+              protectionEndsAt: Number(protectionState[2]),
+              canLiquidate: Boolean(protectionState[3]),
+            },
+          } satisfies MonitoredPosition;
+        }),
+      );
+
+      setMonitoredPositions(nextPositions);
+    } catch (loadError) {
+      setError(extractErrorMessage(loadError));
+    }
+  }
+
   useEffect(() => {
     void refreshDashboard();
+    void refreshWatchlist();
     const poll = window.setInterval(() => {
       void refreshDashboard();
+      void refreshWatchlist();
     }, pollIntervalMs);
     return () => window.clearInterval(poll);
-  }, [viewedAddress, lendingAddress, pollIntervalMs, rpcUrl]);
+  }, [viewedAddress, lendingAddress, pollIntervalMs, rpcUrl, watchlist]);
 
   async function runTransaction(label: string, action: () => Promise<void>) {
     try {
@@ -697,6 +826,21 @@ export function ProtectionDashboard({
   }
 
   async function handleLiquidate() {
+    if (dashboard && !dashboard.protection.canLiquidate) {
+      const endsAt =
+        dashboard.protection.protectionEndsAt > now
+          ? new Date(dashboard.protection.protectionEndsAt * 1000).toLocaleString()
+          : null;
+
+      setWarning({
+        title: "Protection window is still active",
+        message: endsAt
+          ? `This position cannot be liquidated yet. The 24-hour protection window stays active until ${endsAt}.`
+          : "This position cannot be liquidated yet because the 24-hour protection window is still active.",
+      });
+      return;
+    }
+
     await runTransaction("Liquidation", async () => {
       const targetUser = normalizeAddress(forms.liquidateUser);
       if (!isConfiguredAddress(targetUser)) {
@@ -776,6 +920,9 @@ export function ProtectionDashboard({
           </button>
           <button className={`nav-link ${selectedTab === "dashboard" ? "nav-link-active" : ""}`} onClick={() => setSelectedTab("dashboard")}>
             Dashboard
+          </button>
+          <button className={`nav-link ${selectedTab === "market" ? "nav-link-active" : ""}`} onClick={() => setSelectedTab("market")}>
+            Liquidation Watch
           </button>
           <button className={`nav-link ${selectedTab === "debug" ? "nav-link-active" : ""}`} onClick={() => setSelectedTab("debug")}>
             Debug Contracts
@@ -1123,6 +1270,96 @@ export function ProtectionDashboard({
         </>
           )}
         </>
+      )}
+
+      {selectedTab === "market" && (
+        <section className="market-grid">
+          <section className="panel">
+            <div className="panel-header">
+              <h2>Liquidation Watch</h2>
+              <span className="panel-badge">{monitoredPositions.length} tracked</span>
+            </div>
+            <p className="market-copy">
+              Track borrower addresses and monitor when their 24-hour protection window expires. Expired positions can be sent directly into the liquidation form.
+            </p>
+            <div className="watch-input-row">
+              <input
+                className="input"
+                value={watchAddressInput}
+                onChange={event => setWatchAddressInput(event.target.value)}
+                placeholder="Add borrower address to watch"
+              />
+              <button className="action-button" onClick={addWatchAddress}>
+                Add Address
+              </button>
+            </div>
+            {watchlist.length > 0 ? (
+              <div className="watch-tag-list">
+                {watchlist.map(address => (
+                  <button key={address} className="watch-tag" onClick={() => removeWatchAddress(address)}>
+                    {shortenAddress(address)} <span aria-hidden="true">×</span>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="chart-hint">
+                Add borrower addresses here. This app does not have an on-chain borrower registry, so the watchlist is built from addresses you care about.
+              </div>
+            )}
+          </section>
+
+          <section className="panel">
+            <div className="panel-header">
+              <h2>Tracked Positions</h2>
+              <span className="panel-badge subtle">Liquidate only when protection expired</span>
+            </div>
+            <div className="monitor-table">
+              <div className="monitor-head">
+                <span>Address</span>
+                <span>Status</span>
+                <span>Collateral</span>
+                <span>Debt</span>
+                <span>Ratio</span>
+                <span>Protection Ends</span>
+                <span>Action</span>
+              </div>
+              {monitoredPositions.length > 0 ? (
+                monitoredPositions.map(position => {
+                  const statusMeta = monitorStatus(position.protection);
+                  const canLiquidate = position.protection.canLiquidate;
+                  return (
+                    <div className="monitor-row" key={position.address}>
+                      <span>{shortenAddress(position.address)}</span>
+                      <span className={`status-pill status-pill-${statusMeta.tone}`}>{statusMeta.label}</span>
+                      <span>{formatAmount(position.collateralEth)} ETH</span>
+                      <span>{formatAmount(position.debtCorn)} CORN</span>
+                      <span>{Number.isFinite(position.ratioPercent) ? `${formatAmount(position.ratioPercent, 1)}%` : "Infinite"}</span>
+                      <span>
+                        {position.protection.protectionEndsAt
+                          ? new Date(position.protection.protectionEndsAt * 1000).toLocaleString()
+                          : "Not active"}
+                      </span>
+                      {canLiquidate ? (
+                        <button
+                          className="row-action-button"
+                          onClick={() => prepareLiquidation(position.address)}
+                        >
+                          Use for liquidation
+                        </button>
+                      ) : (
+                        <div className="monitor-note">
+                          Protected while the recovery window is active
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              ) : (
+                <div className="chart-hint">No tracked borrowers yet. Add an address to start monitoring its position.</div>
+              )}
+            </div>
+          </section>
+        </section>
       )}
 
       {selectedTab === "debug" && (
