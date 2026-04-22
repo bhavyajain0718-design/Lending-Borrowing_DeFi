@@ -42,6 +42,11 @@ type DashboardState = {
   protection: ProtectionState;
 };
 
+type RatioSnapshot = {
+  timestamp: number;
+  ratioPercent: number;
+};
+
 type Props = {
   lendingAddress?: string;
   homeownerAddress?: string;
@@ -64,6 +69,9 @@ type FormState = {
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const SEPOLIA_CHAIN_ID = "0xaa36a7";
 const MIN_RATIO_PERCENT = 120;
+const SEPOLIA_FAUCET_URL = "https://www.alchemy.com/faucets/ethereum-sepolia";
+const MAX_RATIO_HISTORY_POINTS = 24;
+const RATIO_HISTORY_STORAGE_KEY = "neverland_ratio_history";
 
 const statusCopy = {
   secure: {
@@ -103,6 +111,24 @@ function shortenAddress(address: string) {
   return `${address.slice(0, 6)}...${address.slice(-4)}`;
 }
 
+function getWalletBadge(address?: string | null) {
+  if (!address) return "N";
+  return address.slice(2, 4).toUpperCase();
+}
+
+function chainLabel(chainId?: string | null) {
+  switch (chainId) {
+    case SEPOLIA_CHAIN_ID:
+      return "Sepolia";
+    case "0x7a69":
+      return "Hardhat";
+    case "0x1":
+      return "Ethereum";
+    default:
+      return "Wallet";
+  }
+}
+
 function formatCountdown(remainingSeconds: number) {
   const hours = Math.floor(remainingSeconds / 3600);
   const minutes = Math.floor((remainingSeconds % 3600) / 60);
@@ -116,17 +142,90 @@ function ratioToPercent(healthFactor: number) {
   return healthFactor * MIN_RATIO_PERCENT;
 }
 
-function buildTrendPoints(ratioPercent: number) {
-  const safeRatio = Number.isFinite(ratioPercent) ? ratioPercent : 145;
-  return [safeRatio - 12, safeRatio - 6, safeRatio - 8, safeRatio - 4, safeRatio].map((value, index) => ({
-    x: (index / 4) * 100,
-    y: Math.max(95, Math.min(150, value)),
+type ChartBounds = {
+  min: number;
+  max: number;
+  ticks: number[];
+};
+
+function roundUp(value: number, step: number) {
+  return Math.ceil(value / step) * step;
+}
+
+function chooseTickStep(approxStep: number) {
+  const steps = [10, 20, 25, 50, 100, 200, 250, 500, 1000];
+  return steps.find(step => approxStep <= step) ?? 1000;
+}
+
+function buildChartBounds(ratioPercent: number): ChartBounds {
+  if (!Number.isFinite(ratioPercent)) {
+    return {
+      min: 90,
+      max: 180,
+      ticks: [180, 150, 120, 90],
+    };
+  }
+
+  const min = 90;
+  const rawMax = Math.max(180, ratioPercent * 1.1);
+  const stepSize = chooseTickStep((rawMax - min) / 5);
+  const max = roundUp(rawMax, stepSize);
+  const tickCount = Math.ceil((max - min) / stepSize);
+  const ticks = Array.from({ length: tickCount + 1 }, (_, index) => max - index * stepSize).filter(tick => tick >= min);
+  if (ticks[ticks.length - 1] !== min) {
+    ticks.push(min);
+  }
+  return { min, max, ticks };
+}
+
+function buildTrendPoints(history: RatioSnapshot[], bounds: ChartBounds) {
+  const floor = bounds.min;
+  const ceiling = bounds.max;
+
+  if (history.length === 0) {
+    return [];
+  }
+
+  if (history.length === 1) {
+    return [
+      {
+        x: 1,
+        y: Math.max(floor, Math.min(ceiling, history[0].ratioPercent)),
+      },
+    ];
+  }
+
+  const firstTimestamp = history[0].timestamp;
+  const lastTimestamp = history[history.length - 1].timestamp;
+  const range = lastTimestamp - firstTimestamp;
+
+  if (range < Math.max(30, history.length * 5)) {
+    return history.map((snapshot, index) => ({
+      x: index / Math.max(history.length - 1, 1),
+      y: Math.max(floor, Math.min(ceiling, snapshot.ratioPercent)),
+    }));
+  }
+
+  return history.map(snapshot => ({
+    x: (snapshot.timestamp - firstTimestamp) / range,
+    y: Math.max(floor, Math.min(ceiling, snapshot.ratioPercent)),
   }));
 }
 
-function chartPath(points: Array<{ x: number; y: number }>) {
+function chartX(position: number) {
+  const normalized = Math.max(0, Math.min(1, position));
+  return 18 + normalized * 74;
+}
+
+function chartY(value: number, bounds: ChartBounds) {
+  const usableHeight = 48;
+  const range = bounds.max - bounds.min || 1;
+  return 52 - ((value - bounds.min) / range) * usableHeight;
+}
+
+function chartPath(points: Array<{ x: number; y: number }>, bounds: ChartBounds) {
   return points
-    .map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${150 - point.y}`)
+    .map((point, index) => `${index === 0 ? "M" : "L"} ${chartX(point.x)} ${chartY(point.y, bounds)}`)
     .join(" ");
 }
 
@@ -150,6 +249,46 @@ function extractErrorMessage(error: unknown) {
   return "Transaction failed";
 }
 
+function readStoredRatioHistory() {
+  if (typeof window === "undefined") return {};
+  try {
+    const stored = window.localStorage.getItem(RATIO_HISTORY_STORAGE_KEY);
+    if (!stored) return {};
+    const parsed = JSON.parse(stored);
+    return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, RatioSnapshot[]>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function formatTimeLabel(timestamp: number) {
+  return new Date(timestamp * 1000).toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function WalletEmptyState({
+  title,
+  message,
+  onConnect,
+}: {
+  title: string;
+  message: string;
+  onConnect: () => void;
+}) {
+  return (
+    <section className="panel wallet-empty-state">
+      <p className="status-chip status-chip-active">Wallet Required</p>
+      <h2>{title}</h2>
+      <p>{message}</p>
+      <button className="action-button wallet-empty-action" onClick={onConnect}>
+        Connect The Wallet
+      </button>
+    </section>
+  );
+}
+
 export function ProtectionDashboard({
   lendingAddress,
   homeownerAddress,
@@ -157,9 +296,12 @@ export function ProtectionDashboard({
   pollIntervalMs = 5000,
 }: Props) {
   const [dashboard, setDashboard] = useState<DashboardState | null>(null);
+  const [ratioHistoryByWallet, setRatioHistoryByWallet] = useState<Record<string, RatioSnapshot[]>>({});
   const [error, setError] = useState<string | null>(null);
   const [selectedTab, setSelectedTab] = useState<TabId>("dashboard");
   const [connectedAddress, setConnectedAddress] = useState<string | null>(null);
+  const [connectedChainId, setConnectedChainId] = useState<string | null>(null);
+  const [walletTrayOpen, setWalletTrayOpen] = useState(false);
   const [txState, setTxState] = useState<TxState>({ kind: "idle" });
   const [warning, setWarning] = useState<WarningState>(null);
   const [forms, setForms] = useState<FormState>({
@@ -173,10 +315,11 @@ export function ProtectionDashboard({
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
   const providerRef = useRef<JsonRpcProvider | null>(null);
 
-  const viewedAddress = useMemo(
-    () => normalizeAddress(connectedAddress ?? homeownerAddress),
-    [connectedAddress, homeownerAddress],
-  );
+  useEffect(() => {
+    setRatioHistoryByWallet(readStoredRatioHistory());
+  }, []);
+
+  const viewedAddress = useMemo(() => normalizeAddress(connectedAddress), [connectedAddress]);
 
   useEffect(() => {
     setForms(current => ({
@@ -184,6 +327,17 @@ export function ProtectionDashboard({
       liquidateUser: current.liquidateUser || homeownerAddress || "",
     }));
   }, [homeownerAddress]);
+
+  useEffect(() => {
+    setTxState({ kind: "idle" });
+    setWarning(null);
+    setError(null);
+  }, [connectedAddress]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(RATIO_HISTORY_STORAGE_KEY, JSON.stringify(ratioHistoryByWallet));
+  }, [ratioHistoryByWallet]);
 
   useEffect(() => {
     if (!rpcUrl) {
@@ -204,9 +358,13 @@ export function ProtectionDashboard({
     const handleAccountsChanged = (accounts: unknown) => {
       const nextAccount = Array.isArray(accounts) && typeof accounts[0] === "string" ? normalizeAddress(accounts[0]) : null;
       setConnectedAddress(nextAccount);
+      setWalletTrayOpen(false);
     };
 
-    const handleChainChanged = () => {
+    const handleChainChanged = (chainId: unknown) => {
+      if (typeof chainId === "string") {
+        setConnectedChainId(chainId);
+      }
       void refreshDashboard();
     };
 
@@ -219,23 +377,46 @@ export function ProtectionDashboard({
     };
   }, []);
 
+  useEffect(() => {
+    async function hydrateWallet() {
+      if (!window.ethereum) return;
+
+      try {
+        const [accounts, chainId] = await Promise.all([
+          window.ethereum.request({ method: "eth_accounts" }) as Promise<string[]>,
+          window.ethereum.request({ method: "eth_chainId" }) as Promise<string>,
+        ]);
+
+        const nextAccount = accounts[0] ? normalizeAddress(accounts[0]) : null;
+        setConnectedAddress(nextAccount);
+        setConnectedChainId(chainId);
+      } catch {
+        // Ignore passive wallet hydration failures and let explicit connect handle them.
+      }
+    }
+
+    void hydrateWallet();
+  }, []);
+
   async function ensureWalletReady() {
     if (!window.ethereum) {
       throw new Error("No browser wallet found. Open this page in MetaMask-enabled browser.");
     }
 
-    const chainId = (await window.ethereum.request({ method: "eth_chainId" })) as string;
+    let chainId = (await window.ethereum.request({ method: "eth_chainId" })) as string;
     if (chainId !== SEPOLIA_CHAIN_ID) {
       await window.ethereum.request({
         method: "wallet_switchEthereumChain",
         params: [{ chainId: SEPOLIA_CHAIN_ID }],
       });
+      chainId = SEPOLIA_CHAIN_ID;
     }
 
     const browserProvider = new BrowserProvider(window.ethereum);
     const signer = await browserProvider.getSigner();
     const signerAddress = normalizeAddress(await signer.getAddress());
     setConnectedAddress(signerAddress);
+    setConnectedChainId(chainId);
     return { browserProvider, signer, signerAddress };
   }
 
@@ -248,11 +429,47 @@ export function ProtectionDashboard({
         method: "eth_requestAccounts",
       })) as string[];
       const nextAccount = accounts[0] ? normalizeAddress(accounts[0]) : null;
+      const chainId = (await window.ethereum.request({ method: "eth_chainId" })) as string;
       setConnectedAddress(nextAccount);
+      setConnectedChainId(chainId);
+      setWalletTrayOpen(Boolean(nextAccount));
       setError(null);
     } catch (connectError) {
       setError(extractErrorMessage(connectError));
     }
+  }
+
+  async function changeWallet() {
+    try {
+      if (!window.ethereum) {
+        throw new Error("MetaMask or another EVM wallet is required to change wallets.");
+      }
+
+      await window.ethereum.request({
+        method: "wallet_requestPermissions",
+        params: [{ eth_accounts: {} }],
+      });
+
+      const accounts = (await window.ethereum.request({
+        method: "eth_requestAccounts",
+      })) as string[];
+      const nextAccount = accounts[0] ? normalizeAddress(accounts[0]) : null;
+      const chainId = (await window.ethereum.request({ method: "eth_chainId" })) as string;
+      setConnectedAddress(nextAccount);
+      setConnectedChainId(chainId);
+      setWalletTrayOpen(false);
+      setError(null);
+    } catch (changeError) {
+      setError(extractErrorMessage(changeError));
+    }
+  }
+
+  function disconnectWallet() {
+    setConnectedAddress(null);
+    setConnectedChainId(null);
+    setDashboard(null);
+    setWalletTrayOpen(false);
+    setError(null);
   }
 
   async function refreshDashboard() {
@@ -264,9 +481,11 @@ export function ProtectionDashboard({
         throw new Error("NEXT_PUBLIC_LENDING_ADDRESS is missing or invalid.");
       }
 
-      const accountToView = viewedAddress || normalizeAddress(homeownerAddress);
+      const accountToView = viewedAddress;
       if (!isConfiguredAddress(accountToView)) {
-        throw new Error("Connect a wallet or configure NEXT_PUBLIC_HOMEOWNER_ADDRESS.");
+        setDashboard(null);
+        setError(null);
+        return;
       }
 
       const provider = providerRef.current;
@@ -320,6 +539,32 @@ export function ProtectionDashboard({
           canLiquidate: Boolean(protectionState[3]),
         },
       });
+
+      const liveRatioPercent = ratioToPercent(Number(formatUnits(healthFactor, 18)));
+      if (Number.isFinite(liveRatioPercent)) {
+        setRatioHistoryByWallet(current => {
+          const existingHistory = current[accountToView] ?? [];
+          const nextEntry = {
+            timestamp: now,
+            ratioPercent: liveRatioPercent,
+          };
+          const nextHistory =
+            existingHistory.length === 0
+              ? [
+                  { timestamp: now - 60, ratioPercent: liveRatioPercent },
+                  { timestamp: now - 45, ratioPercent: liveRatioPercent },
+                  { timestamp: now - 30, ratioPercent: liveRatioPercent },
+                  { timestamp: now - 15, ratioPercent: liveRatioPercent },
+                  nextEntry,
+                ]
+              : [...existingHistory, nextEntry];
+
+          return {
+            ...current,
+            [accountToView]: nextHistory.slice(-MAX_RATIO_HISTORY_POINTS),
+          };
+        });
+      }
       setError(null);
     } catch (loadError) {
       setError(extractErrorMessage(loadError));
@@ -332,7 +577,7 @@ export function ProtectionDashboard({
       void refreshDashboard();
     }, pollIntervalMs);
     return () => window.clearInterval(poll);
-  }, [viewedAddress, homeownerAddress, lendingAddress, pollIntervalMs, rpcUrl]);
+  }, [viewedAddress, lendingAddress, pollIntervalMs, rpcUrl]);
 
   async function runTransaction(label: string, action: () => Promise<void>) {
     try {
@@ -448,11 +693,36 @@ export function ProtectionDashboard({
       ? dashboard.protection.protectionEndsAt - now
       : 0;
 
-  const ratioPercent = ratioToPercent(dashboard?.healthFactor ?? Infinity);
-  const trendPoints = buildTrendPoints(ratioPercent);
-  const chartLine = chartPath(trendPoints);
-  const activeAddress = viewedAddress || normalizeAddress(homeownerAddress);
+  const activeAddress = viewedAddress;
   const hasPosition = (dashboard?.collateralEth ?? 0) > 0 || (dashboard?.debtCorn ?? 0) > 0;
+  const ratioPercent = ratioToPercent(dashboard?.healthFactor ?? Infinity);
+  const ratioHistory = activeAddress ? ratioHistoryByWallet[activeAddress] ?? [] : [];
+  const showChartSeries = hasPosition && (ratioHistory.length > 0 || Number.isFinite(ratioPercent));
+  const chartBounds = buildChartBounds(ratioPercent);
+  const trendPoints = buildTrendPoints(
+    showChartSeries && ratioHistory.length > 0
+      ? ratioHistory
+      : showChartSeries && Number.isFinite(ratioPercent)
+        ? [{ timestamp: now, ratioPercent }]
+        : [],
+    chartBounds,
+  );
+  const chartLine = chartPath(trendPoints, chartBounds);
+  const thresholdY = chartY(MIN_RATIO_PERCENT, chartBounds);
+  const currentY = Number.isFinite(ratioPercent) ? chartY(ratioPercent, chartBounds) : chartY(chartBounds.max - 12, chartBounds);
+  const yTicks = chartBounds.ticks;
+  const timeLabels =
+    ratioHistory.length >= 2
+      ? [
+          formatTimeLabel(ratioHistory[0].timestamp),
+          formatTimeLabel(ratioHistory[Math.floor((ratioHistory.length - 1) / 2)].timestamp),
+          formatTimeLabel(ratioHistory[ratioHistory.length - 1].timestamp),
+        ]
+      : ["Start", "Time", "Now"];
+  const networkName = chainLabel(connectedChainId);
+  const connectedLabel = connectedAddress ? shortenAddress(connectedAddress) : "Connect Wallet";
+  const walletBadge = getWalletBadge(connectedAddress);
+  const needsWallet = !connectedAddress;
 
   return (
     <div className="shell">
@@ -478,17 +748,73 @@ export function ProtectionDashboard({
         </nav>
 
         <div className="wallet-group">
-          <div className="wallet-pill">
+          <div className="wallet-balance-block">
             <div className="wallet-balance">{formatAmount(dashboard?.walletEth ?? 0)} ETH</div>
-            <div className="wallet-address">
-              {activeAddress ? shortenAddress(activeAddress) : "No wallet"}
-            </div>
+            <div className="wallet-network">{networkName}</div>
           </div>
-          <button className="connect-button" onClick={connectWallet}>
-            {connectedAddress ? "Switch / Refresh Wallet" : "Connect Wallet"}
+          <button
+            className={`wallet-chip ${connectedAddress ? "wallet-chip-connected" : ""}`}
+            onClick={() => setWalletTrayOpen(open => !open)}
+          >
+            <span className="wallet-avatar">{walletBadge}</span>
+            <span className="wallet-chip-text">{connectedLabel}</span>
+            <span className="wallet-chevron">▾</span>
+          </button>
+          <button className="wallet-icon-button" onClick={() => window.open(SEPOLIA_FAUCET_URL, "_blank", "noopener,noreferrer")}>
+            <span aria-hidden="true">◫</span>
           </button>
         </div>
       </header>
+
+      {walletTrayOpen && (
+        <section className="wallet-tray">
+          {connectedAddress ? (
+            <button
+              className="wallet-faucet-button"
+              onClick={() => window.open(SEPOLIA_FAUCET_URL, "_blank", "noopener,noreferrer")}
+            >
+              Grab funds from faucet
+            </button>
+          ) : null}
+          <div className="wallet-action-row">
+            <button className="wallet-action-button" onClick={connectedAddress ? changeWallet : connectWallet}>
+              {connectedAddress ? "Change Wallet" : "Connect Wallet"}
+            </button>
+            {connectedAddress ? (
+              <button className="wallet-action-button wallet-action-button-secondary" onClick={disconnectWallet}>
+                Disconnect
+              </button>
+            ) : null}
+          </div>
+          <div className="wallet-tray-grid">
+            <div className="wallet-tray-card">
+              <div className="wallet-tray-title">{connectedAddress ? "CORN Price" : "Wallet Status"}</div>
+              <div className="wallet-tray-value">
+                {connectedAddress ? `${formatAmount(dashboard?.cornPriceEth ?? 0, 6)} ETH` : "Connect The Wallet"}
+              </div>
+              <div className="wallet-tray-subvalue">
+                {connectedAddress
+                  ? `${dashboard?.cornPriceEth ? formatAmount(1 / dashboard.cornPriceEth, 2) : "0.00"} CORN/ETH`
+                  : "Connect to load balances, position health, and protection state."}
+              </div>
+            </div>
+            <div className="wallet-tray-card">
+              <div className="wallet-tray-title">{connectedAddress ? "CORN Wallet" : "Quick Navigation"}</div>
+              <div className="wallet-tray-value">
+                {connectedAddress ? `${formatAmount(dashboard?.walletCorn ?? 0)} CORN` : "Dashboard"}
+              </div>
+              <div className="wallet-tray-actions">
+                <button className="wallet-mini-action" onClick={() => setSelectedTab("dashboard")}>
+                  Dashboard
+                </button>
+                <button className="wallet-mini-action" onClick={() => setSelectedTab("debug")}>
+                  Debug
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
 
       {txState.kind !== "idle" && (
         <div className={`tx-banner tx-banner-${txState.kind}`}>{txState.label}</div>
@@ -509,24 +835,48 @@ export function ProtectionDashboard({
       {selectedTab === "home" && (
         <section className="home-hero">
           <div className="panel">
-            <p className={`status-chip status-chip-${status.tone}`}>Protection Status</p>
-            <h1>{status.title}</h1>
-            <p className="hero-copy">{status.description}</p>
-            <div className="home-grid">
-              <MetricCard label="Connected Wallet" value={activeAddress ? shortenAddress(activeAddress) : "Not connected"} />
-              <MetricCard label="CORN Wallet" value={`${formatAmount(dashboard?.walletCorn ?? 0)} CORN`} />
-              <MetricCard label="Collateral Value" value={`${formatAmount(dashboard?.collateralValueCorn ?? 0)} CORN`} />
-              <MetricCard label="Protection Ends" value={dashboard?.protection.protectionEndsAt ? new Date(dashboard.protection.protectionEndsAt * 1000).toLocaleString() : "Not active"} />
-            </div>
+            <p className={`status-chip status-chip-${status.tone}`}>
+              <span className="status-dot" aria-hidden="true" />
+              Protection Status
+            </p>
+            <h1>{needsWallet ? "Connect The Wallet" : status.title}</h1>
+            <p className="hero-copy">
+              {needsWallet
+                ? "Connect your wallet to load live balances, borrowing controls, protection status, and liquidation timing."
+                : status.description}
+            </p>
+            {needsWallet ? (
+              <button className="action-button wallet-empty-action" onClick={connectWallet}>
+                Connect The Wallet
+              </button>
+            ) : (
+              <div className="home-grid">
+                <MetricCard label="Connected Wallet" value={activeAddress ? shortenAddress(activeAddress) : "Not connected"} />
+                <MetricCard label="CORN Wallet" value={`${formatAmount(dashboard?.walletCorn ?? 0)} CORN`} />
+                <MetricCard label="Collateral Value" value={`${formatAmount(dashboard?.collateralValueCorn ?? 0)} CORN`} />
+                <MetricCard label="Protection Ends" value={dashboard?.protection.protectionEndsAt ? new Date(dashboard.protection.protectionEndsAt * 1000).toLocaleString() : "Not active"} />
+              </div>
+            )}
           </div>
         </section>
       )}
 
       {selectedTab === "dashboard" && (
         <>
+          {needsWallet ? (
+            <WalletEmptyState
+              title="Connect The Wallet"
+              message="The dashboard needs an active wallet to show your collateral, debt, health factor, protection window, and transaction actions."
+              onConnect={connectWallet}
+            />
+          ) : (
+        <>
           <section className="hero">
             <div>
-              <p className={`status-chip status-chip-${status.tone}`}>Protection Status</p>
+              <p className={`status-chip status-chip-${status.tone}`}>
+                <span className="status-dot" aria-hidden="true" />
+                Protection Status
+              </p>
               <h1>Lending Dashboard</h1>
               <p className="hero-copy">{status.description}</p>
             </div>
@@ -636,36 +986,88 @@ export function ProtectionDashboard({
 
               <section className="panel">
                 <div className="panel-header">
-                  <h2>Collateral / Debt Ratio Over Time</h2>
+                  <h2>Total Collateral/Debt Ratio</h2>
                   <span className="panel-badge subtle">Protocol safety floor 120%</span>
                 </div>
                 <div className="chart-card">
-                  <div className="chart-summary">
-                    <div>
-                      <span className="mini-label">Current Ratio</span>
-                      <strong>{Number.isFinite(ratioPercent) ? `${formatAmount(ratioPercent, 1)}%` : "Infinite"}</strong>
+                  <div className="chart-plot">
+                    <div className="chart-y-axis">
+                      {yTicks.map(tick => (
+                        <span key={tick}>{tick}%</span>
+                      ))}
                     </div>
-                    <div>
-                      <span className="mini-label">Protection Ends</span>
-                      <strong>
-                        {dashboard?.protection.protectionEndsAt
-                          ? new Date(dashboard.protection.protectionEndsAt * 1000).toLocaleString()
-                          : "Not active"}
-                      </strong>
+                    <div className="chart-canvas">
+                      <svg viewBox="0 0 100 60" className="ratio-chart" preserveAspectRatio="none">
+                        <line x1="18" y1="4" x2="18" y2="52" className="axis-line" />
+                        <line x1="18" y1="52" x2="92" y2="52" className="axis-line" />
+                        <line x1="18" y1={thresholdY} x2="92" y2={thresholdY} className="threshold-line" />
+                        {yTicks.map(tick => {
+                          const y = chartY(tick, chartBounds);
+                          return (
+                            <line
+                              key={tick}
+                              x1="17"
+                              y1={y}
+                              x2="18.8"
+                              y2={y}
+                              className="axis-tick"
+                            />
+                          );
+                        })}
+                        {trendPoints.map((point, index) => {
+                          const x = chartX(point.x);
+                          const y = chartY(point.y, chartBounds);
+                          if (index === trendPoints.length - 1) {
+                            return (
+                              <g key={`trend-point-active-${index}-${point.x}-${point.y}`}>
+                                <circle cx={x} cy={y} r="1.8" className="trend-point trend-point-active" />
+                                <circle cx={x} cy={y} r="3.2" className="trend-point-halo" />
+                              </g>
+                            );
+                          }
+                          return (
+                            <circle
+                              key={`trend-point-${index}-${point.x}-${point.y}`}
+                              cx={x}
+                              cy={y}
+                              r="1.2"
+                              className="trend-point"
+                            />
+                          );
+                        })}
+                        {showChartSeries && trendPoints.length >= 2 ? (
+                          <path d={chartLine} className="trend-line" />
+                        ) : showChartSeries ? (
+                          <line x1="18" y1={currentY} x2="92" y2={currentY} className="trend-line" />
+                        ) : null}
+                      </svg>
                     </div>
                   </div>
-                  <svg viewBox="0 0 100 60" className="ratio-chart" preserveAspectRatio="none">
-                    <line x1="0" y1="30" x2="100" y2="30" className="threshold-line" />
-                    <path d={chartLine} className="trend-line" />
-                    {trendPoints.map(point => (
-                      <circle key={`${point.x}-${point.y}`} cx={point.x} cy={150 - point.y} r="1.4" className="trend-point" />
-                    ))}
-                  </svg>
-                  <div className="chart-axis">
-                    <span>90%</span>
-                    <span>120%</span>
-                    <span>150%</span>
+                  <div className="chart-footer">
+                    <span className="chart-caption">
+                      Current HF Ratio: {hasPosition ? (Number.isFinite(ratioPercent) ? `${formatAmount(ratioPercent, 1)}%` : "Infinite") : "No position"}
+                    </span>
+                    <span className="chart-time-label">{timeLabels[1]}</span>
+                    <span className="chart-caption">
+                      {dashboard?.protection.protectionEndsAt
+                        ? `Protection ends ${new Date(dashboard.protection.protectionEndsAt * 1000).toLocaleTimeString()}`
+                        : "Protection not active"}
+                    </span>
                   </div>
+                  <div className="chart-time-axis">
+                    <span>{timeLabels[0]}</span>
+                    <span>{timeLabels[1]}</span>
+                    <span>{timeLabels[2]}</span>
+                  </div>
+                  {!hasPosition ? (
+                    <div className="chart-hint">
+                      No position yet. Deposit collateral and borrow CORN to start plotting health-factor history.
+                    </div>
+                  ) : ratioHistory.length < 2 && (
+                    <div className="chart-hint">
+                      More history appears after the dashboard observes additional price or position changes.
+                    </div>
+                  )}
                 </div>
               </section>
 
@@ -679,6 +1081,8 @@ export function ProtectionDashboard({
               </section>
             </div>
           </div>
+        </>
+          )}
         </>
       )}
 

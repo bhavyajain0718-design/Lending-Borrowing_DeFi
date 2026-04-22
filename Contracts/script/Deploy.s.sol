@@ -9,21 +9,27 @@ import {MovePrice} from "../src/MovePrice.sol";
 import {FlashLoanLiquidator} from "../src/FlashLoanLiquidator.sol";
 
 contract DeployScript is Script {
-    function run() external {
-        vm.startBroadcast();
-
-        Corn corn = new Corn();
-        CornDEX cornDex = new CornDEX(corn, 2_000e18);
-        Lending lending = new Lending(corn, cornDex);
-        MovePrice mover = new MovePrice(cornDex);
-        FlashLoanLiquidator liquidator = new FlashLoanLiquidator(corn, cornDex, lending);
+    function deploy()
+        public
+        returns (Corn corn, CornDEX cornDex, Lending lending, MovePrice mover, FlashLoanLiquidator liquidator)
+    {
+        corn = new Corn();
+        cornDex = new CornDEX(corn, 2_000e18);
+        lending = new Lending(corn, cornDex);
+        mover = new MovePrice(cornDex);
+        liquidator = new FlashLoanLiquidator(corn, cornDex, lending);
 
         corn.setMinter(address(lending), true);
         cornDex.transferOwnership(address(mover));
 
-        vm.stopBroadcast();
+        return (corn, cornDex, lending, mover, liquidator);
+    }
 
-        mover;
-        liquidator;
+    function run() external {
+        vm.startBroadcast();
+
+        deploy();
+
+        vm.stopBroadcast();
     }
 }

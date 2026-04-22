@@ -2,13 +2,13 @@
 pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
-import {Corn} from "../src/Corn.sol";
-import {CornDEX} from "../src/CornDEX.sol";
-import {Lending} from "../src/Lending.sol";
-import {MovePrice} from "../src/MovePrice.sol";
-import {FlashLoanLiquidator} from "../src/FlashLoanLiquidator.sol";
+import {Corn} from "../../src/Corn.sol";
+import {CornDEX} from "../../src/CornDEX.sol";
+import {Lending} from "../../src/Lending.sol";
+import {MovePrice} from "../../src/MovePrice.sol";
+import {FlashLoanLiquidator} from "../../src/FlashLoanLiquidator.sol";
 
-contract NeverlandLendingTest is Test {
+contract LendingIntegrationTest is Test {
     uint256 internal constant INITIAL_PRICE = 2_000e18;
     uint256 internal constant CRASHED_PRICE = 1_000e18;
 
@@ -42,27 +42,17 @@ contract NeverlandLendingTest is Test {
         lending.borrow(4_000e18);
     }
 
-    function testHealthFactorUses120PercentThreshold() public view {
-        uint256 expectedHealthFactor = (6_000e18 * 1e18 * 10_000) / (4_000e18 * 12_000);
-        assertEq(lending.getHealthFactor(homeowner), expectedHealthFactor);
-    }
-
-    function testMovePriceCrashMakesLoanUnhealthy() public {
-        uint256 healthFactorBefore = lending.getHealthFactor(homeowner);
-        assertGt(healthFactorBefore, 1e18);
-
+    function testGracePeriodBlocksImmediateFlashLoanLiquidation() public {
         movePrice.moveEthPriceInCorn(CRASHED_PRICE);
 
-        uint256 healthFactorAfter = lending.getHealthFactor(homeowner);
-        assertLt(healthFactorAfter, 1e18);
-
-        (uint256 protectionHealthFactor, uint256 atRiskSince, uint256 protectionEndsAt, bool canLiquidate) =
-            lending.getProtectionState(homeowner);
-
-        assertEq(protectionHealthFactor, healthFactorAfter);
-        assertEq(atRiskSince, block.timestamp);
+        (uint256 healthFactor,, uint256 protectionEndsAt, bool canLiquidate) = lending.getProtectionState(homeowner);
+        assertLt(healthFactor, 1e18);
+        assertEq(canLiquidate, false);
         assertEq(protectionEndsAt, block.timestamp + 24 hours);
-        assertFalse(canLiquidate);
+
+        vm.prank(liquidatorOperator);
+        vm.expectRevert(abi.encodeWithSelector(Lending.GracePeriodActive.selector, 24 hours));
+        flashLoanLiquidator.execute(homeowner, 2_500e18, liquidatorOperator);
     }
 
     function testCrashThenImmediateLiquidationFailsThenSucceedsAfterTwentyFiveHours() public {
@@ -84,19 +74,6 @@ contract NeverlandLendingTest is Test {
         assertLt(lending.collateralBalance(homeowner), collateralBefore);
     }
 
-    function testGracePeriodBlocksImmediateFlashLoanLiquidation() public {
-        movePrice.moveEthPriceInCorn(CRASHED_PRICE);
-
-        (uint256 healthFactor,, uint256 protectionEndsAt, bool canLiquidate) = lending.getProtectionState(homeowner);
-        assertLt(healthFactor, 1e18);
-        assertEq(canLiquidate, false);
-        assertEq(protectionEndsAt, block.timestamp + 24 hours);
-
-        vm.prank(liquidatorOperator);
-        vm.expectRevert(abi.encodeWithSelector(Lending.GracePeriodActive.selector, 24 hours));
-        flashLoanLiquidator.execute(homeowner, 2_500e18, liquidatorOperator);
-    }
-
     function testLiquidationWorksAfterTwentyFiveHours() public {
         movePrice.moveEthPriceInCorn(CRASHED_PRICE);
         vm.warp(block.timestamp + 25 hours);
@@ -111,28 +88,5 @@ contract NeverlandLendingTest is Test {
         assertEq(lending.debtBalance(homeowner), beforeDebt - 2_500e18);
         assertLt(lending.collateralBalance(homeowner), beforeCollateral);
         assertGt(liquidatorOperator.balance, liquidatorBalanceBefore);
-    }
-
-    function testRiskTimestampResetsWhenCollateralRecovers() public {
-        movePrice.moveEthPriceInCorn(CRASHED_PRICE);
-
-        lending.syncRiskState(homeowner);
-        uint256 firstRiskSince = lending.riskSince(homeowner);
-        assertEq(firstRiskSince, block.timestamp);
-
-        vm.warp(block.timestamp + 12 hours);
-
-        vm.deal(homeowner, 2 ether);
-        vm.prank(homeowner);
-        lending.depositCollateral{value: 2 ether}();
-
-        assertEq(lending.riskSince(homeowner), 0);
-        assertGt(lending.getHealthFactor(homeowner), 1e18);
-
-        movePrice.moveEthPriceInCorn(800e18);
-
-        lending.syncRiskState(homeowner);
-        assertEq(lending.riskSince(homeowner), block.timestamp);
-        assertGt(lending.riskSince(homeowner), firstRiskSince);
     }
 }
