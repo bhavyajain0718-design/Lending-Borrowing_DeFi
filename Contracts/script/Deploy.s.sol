@@ -16,7 +16,7 @@ contract DeployScript is Script {
         corn = new Corn();
         cornDex = new CornDEX(corn, 2_000e18);
         lending = new Lending(corn, cornDex);
-        mover = new MovePrice(cornDex);
+        mover = new MovePrice(cornDex, lending);
         liquidator = new FlashLoanLiquidator(corn, cornDex, lending);
 
         corn.setMinter(address(lending), true);

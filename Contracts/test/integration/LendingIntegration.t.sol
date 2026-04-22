@@ -25,7 +25,7 @@ contract LendingIntegrationTest is Test {
         corn = new Corn();
         cornDex = new CornDEX(corn, INITIAL_PRICE);
         lending = new Lending(corn, cornDex);
-        movePrice = new MovePrice(cornDex);
+        movePrice = new MovePrice(cornDex, lending);
         flashLoanLiquidator = new FlashLoanLiquidator(corn, cornDex, lending);
 
         corn.setMinter(address(lending), true);
@@ -109,5 +109,33 @@ contract LendingIntegrationTest is Test {
 
         assertEq(liquidatorOperator.balance - liquidatorBalanceBefore, expectedSeizedEth);
         assertEq(borrowerCollateralBefore - lending.collateralBalance(homeowner), expectedSeizedEth);
+    }
+
+    function testProtectionWindowRestartsAfterHealthyRecoveryAndSecondCrash() public {
+        movePrice.moveEthPriceInCorn(CRASHED_PRICE);
+
+        (, uint256 firstRiskSince, uint256 firstProtectionEndsAt, bool firstCanLiquidate) = lending.getProtectionState(homeowner);
+        assertEq(firstRiskSince, block.timestamp);
+        assertEq(firstProtectionEndsAt, block.timestamp + 24 hours);
+        assertFalse(firstCanLiquidate);
+
+        vm.warp(block.timestamp + 3 hours);
+        movePrice.moveEthPriceInCorn(INITIAL_PRICE);
+
+        (uint256 recoveredHealthFactor, uint256 recoveredRiskSince, uint256 recoveredProtectionEndsAt, bool recoveredCanLiquidate) =
+            lending.getProtectionState(homeowner);
+        assertGt(recoveredHealthFactor, 1e18);
+        assertEq(recoveredRiskSince, 0);
+        assertEq(recoveredProtectionEndsAt, 0);
+        assertFalse(recoveredCanLiquidate);
+
+        vm.warp(block.timestamp + 2 hours);
+        movePrice.moveEthPriceInCorn(CRASHED_PRICE);
+
+        (, uint256 secondRiskSince, uint256 secondProtectionEndsAt, bool secondCanLiquidate) = lending.getProtectionState(homeowner);
+        assertEq(secondRiskSince, block.timestamp);
+        assertEq(secondProtectionEndsAt, block.timestamp + 24 hours);
+        assertFalse(secondCanLiquidate);
+        assertGt(secondRiskSince, firstRiskSince);
     }
 }

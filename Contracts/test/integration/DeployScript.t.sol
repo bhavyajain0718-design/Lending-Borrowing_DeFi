@@ -27,6 +27,7 @@ contract DeployScriptIntegrationTest is Test {
         assertEq(corn.owner(), address(deployScript));
         assertEq(cornDex.owner(), address(mover));
         assertEq(address(mover.cornDex()), address(cornDex));
+        assertEq(address(mover.lending()), address(lending));
         assertEq(cornDex.ethPriceInCorn(), 2_000e18);
     }
 }

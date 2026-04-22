@@ -26,7 +26,7 @@ contract LendingUnitTest is Test {
         corn = new Corn();
         cornDex = new CornDEX(corn, INITIAL_PRICE);
         lending = new Lending(corn, cornDex);
-        movePrice = new MovePrice(cornDex);
+        movePrice = new MovePrice(cornDex, lending);
         flashLoanLiquidator = new FlashLoanLiquidator(corn, cornDex, lending);
 
         corn.setMinter(address(lending), true);

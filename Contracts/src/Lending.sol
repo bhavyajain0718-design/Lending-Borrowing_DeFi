@@ -19,6 +19,8 @@ contract Lending {
     mapping(address => uint256) public debtBalance;
     mapping(address => uint256) public riskSince;
     mapping(address => uint256) public lastAccountUpdate;
+    mapping(address => bool) public isBorrower;
+    address[] public borrowers;
 
     event CollateralDeposited(address indexed user, uint256 amount);
     event CollateralWithdrawn(address indexed user, uint256 amount);
@@ -158,11 +160,26 @@ contract Lending {
         _syncRiskState(user);
     }
 
+    function syncAllRiskStates() external {
+        uint256 borrowerCount = borrowers.length;
+        for (uint256 i = 0; i < borrowerCount; i++) {
+            _syncRiskState(borrowers[i]);
+        }
+    }
+
     function _depositFor(address user, uint256 amount) internal {
         if (amount == 0) revert ZeroAmount();
+        _registerBorrower(user);
         collateralBalance[user] += amount;
         _syncRiskState(user);
         emit CollateralDeposited(user, amount);
+    }
+
+    function _registerBorrower(address user) internal {
+        if (!isBorrower[user]) {
+            isBorrower[user] = true;
+            borrowers.push(user);
+        }
     }
 
     function _syncRiskState(address user) internal {

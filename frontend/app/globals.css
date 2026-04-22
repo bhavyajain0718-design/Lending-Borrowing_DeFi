@@ -393,6 +393,21 @@ input {
   box-shadow: var(--shadow);
 }
 
+.mini-stat-secure {
+  background: rgba(223, 248, 242, 0.9);
+  border-color: rgba(30, 163, 129, 0.2);
+}
+
+.mini-stat-active {
+  background: rgba(255, 242, 214, 0.92);
+  border-color: rgba(224, 163, 47, 0.2);
+}
+
+.mini-stat-expired {
+  background: rgba(255, 224, 228, 0.92);
+  border-color: rgba(215, 98, 103, 0.2);
+}
+
 .mini-stat strong {
   display: block;
   font-size: 1.05rem;

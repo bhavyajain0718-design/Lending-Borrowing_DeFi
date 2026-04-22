@@ -141,7 +141,8 @@ function chainLabel(chainId?: string | null) {
 function formatCountdown(remainingSeconds: number) {
   const hours = Math.floor(remainingSeconds / 3600);
   const minutes = Math.floor((remainingSeconds % 3600) / 60);
-  return `${hours}h ${minutes}m remaining`;
+  const seconds = Math.max(0, remainingSeconds % 60);
+  return `${hours}h ${minutes}m ${seconds}s remaining`;
 }
 
 function maxSafeBorrowCorn(collateralValueCorn: number, debtCorn: number) {
@@ -1067,7 +1068,7 @@ export function ProtectionDashboard({
                 <span className="mini-label">CORN Price</span>
                 <strong>{formatAmount(dashboard?.cornPriceEth ?? 0, 6)} ETH</strong>
               </div>
-              <div className="mini-stat">
+              <div className={`mini-stat mini-stat-${status.tone}`}>
                 <span className="mini-label">Liquidation Buffer</span>
                 <strong>
                   {dashboard?.protection.protectionEndsAt
