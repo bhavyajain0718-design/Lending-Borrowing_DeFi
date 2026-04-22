@@ -135,6 +135,16 @@ function formatCountdown(remainingSeconds: number) {
   return `${hours}h ${minutes}m remaining`;
 }
 
+function maxSafeBorrowCorn(collateralValueCorn: number, debtCorn: number) {
+  if (!Number.isFinite(collateralValueCorn) || collateralValueCorn <= 0) {
+    return 0;
+  }
+
+  const allowedDebt = collateralValueCorn / (MIN_RATIO_PERCENT / 100);
+  const additionalBorrow = allowedDebt - Math.max(debtCorn, 0);
+  return additionalBorrow > 0 ? additionalBorrow : 0;
+}
+
 function ratioToPercent(healthFactor: number) {
   if (!Number.isFinite(healthFactor) || healthFactor > 1e12) {
     return Infinity;
@@ -638,6 +648,22 @@ export function ProtectionDashboard({
   }
 
   async function handleBorrow() {
+    const requestedBorrowCorn = Number(forms.borrowCorn.trim());
+    const safeBorrowCorn = maxSafeBorrowCorn(dashboard?.collateralValueCorn ?? 0, dashboard?.debtCorn ?? 0);
+
+    if (!Number.isFinite(requestedBorrowCorn) || requestedBorrowCorn <= 0) {
+      setTxState({ kind: "error", label: "Enter a valid CORN amount to borrow." });
+      return;
+    }
+
+    if (requestedBorrowCorn > safeBorrowCorn) {
+      setWarning({
+        title: "Borrow amount exceeds the safe range",
+        message: `You can safely borrow up to ${formatAmount(safeBorrowCorn)} CORN at the 120% collateral floor. Borrow less, add more collateral, or repay existing debt before increasing this amount.`,
+      });
+      return;
+    }
+
     await runTransaction("Borrow", async () => {
       const { signer } = await ensureWalletReady();
       const lending = new Contract(lendingAddress!, lendingAbi, signer);
@@ -653,10 +679,18 @@ export function ProtectionDashboard({
       const lending = new Contract(lendingAddress!, lendingAbi, signer);
       const cornAddress = await lending.corn();
       const cornToken = new Contract(cornAddress, lendingAbi, signer);
-      const amount = parseInputAmount(forms.repayCorn, "corn");
-      const approvalTx = await cornToken.approve(lendingAddress!, amount);
+      const requestedAmount = parseInputAmount(forms.repayCorn, "corn");
+      const signerAddress = await signer.getAddress();
+      const outstandingDebt = await lending.debtBalance(signerAddress);
+
+      if (outstandingDebt === 0n) {
+        throw new Error("No debt to repay for this wallet.");
+      }
+
+      const repayAmount = requestedAmount > outstandingDebt ? outstandingDebt : requestedAmount;
+      const approvalTx = await cornToken.approve(lendingAddress!, repayAmount);
       await approvalTx.wait();
-      const repayTx = await lending.repay(amount);
+      const repayTx = await lending.repay(repayAmount);
       await repayTx.wait();
       setForms(current => ({ ...current, repayCorn: "" }));
     });
@@ -696,6 +730,7 @@ export function ProtectionDashboard({
   const activeAddress = viewedAddress;
   const hasPosition = (dashboard?.collateralEth ?? 0) > 0 || (dashboard?.debtCorn ?? 0) > 0;
   const ratioPercent = ratioToPercent(dashboard?.healthFactor ?? Infinity);
+  const safeBorrowCorn = maxSafeBorrowCorn(dashboard?.collateralValueCorn ?? 0, dashboard?.debtCorn ?? 0);
   const ratioHistory = activeAddress ? ratioHistoryByWallet[activeAddress] ?? [] : [];
   const showChartSeries = hasPosition && (ratioHistory.length > 0 || Number.isFinite(ratioPercent));
   const chartBounds = buildChartBounds(ratioPercent);
@@ -928,6 +963,10 @@ export function ProtectionDashboard({
                     value: forms.borrowCorn,
                     onChange: value => setForms(current => ({ ...current, borrowCorn: value })),
                     placeholder: "100",
+                    hint:
+                      (dashboard?.collateralValueCorn ?? 0) > 0
+                        ? `Max safe borrow right now: ${formatAmount(safeBorrowCorn)} CORN at the 120% health floor`
+                        : "Deposit collateral first to unlock borrowing capacity",
                   },
                   {
                     label: "Repay Debt",
@@ -1111,6 +1150,7 @@ function ActionPanel({
     value: string;
     placeholder: string;
     onChange: (value: string) => void;
+    hint?: string;
   }>;
   actions: Array<{ label: string; onClick: () => void; tone?: "secondary" }>;
 }) {
@@ -1129,6 +1169,7 @@ function ActionPanel({
               onChange={event => field.onChange(event.target.value)}
               placeholder={field.placeholder}
             />
+            {field.hint ? <div className="field-hint">{field.hint}</div> : null}
           </div>
         ))}
         <div className="action-row">

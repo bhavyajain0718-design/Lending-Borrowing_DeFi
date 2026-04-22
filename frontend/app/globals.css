@@ -475,6 +475,13 @@ input {
   color: var(--ink-soft);
 }
 
+.field-hint {
+  margin-top: 8px;
+  font-size: 0.82rem;
+  line-height: 1.35;
+  color: #4f8d97;
+}
+
 .input {
   width: 100%;
   min-height: 50px;
